@@ -1,18 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase.js';
 import { SLOTS, slotLabel, KINDS, kindOf, ACTIVITY, COLORS, MENUS } from './data.js';
-
-/* ---------- helpers ---------- */
-const pad = (n) => String(n).padStart(2, '0');
-const isoDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const addDays = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return isoDate(d); };
-const fmtDate = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('ar', { weekday: 'short', day: 'numeric', month: 'short' });
-const fmtShort = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('ar', { day: 'numeric', month: 'short' });
-const fmtKg = (n) => (n == null ? '—' : Number(n).toLocaleString('ar', { maximumFractionDigits: 1 }));
-const ageOf = (p) => (p?.birth_year ? new Date().getFullYear() - p.birth_year : null);
-const isMinor = (p) => { const a = ageOf(p); return a != null && a < 18; };
-const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } };
+import { addDays, ageOf, fmtDate, fmtKg, fmtShort, isMinor, isoDate, lsGet, lsSet, streakOf } from './lib.js';
+import { currentSubscription, pushState } from './push.js';
+import QuickAdd from './QuickAdd.jsx';
+import Coach from './Coach.jsx';
+import Reminders from './Reminders.jsx';
 
 const TABS = [
   { id: 'home', label: 'اليوم', icon: '🏠' },
@@ -21,6 +14,7 @@ const TABS = [
   { id: 'sport', label: 'الحركة', icon: '🏃' },
   { id: 'coach', label: 'المدرب', icon: '✨' },
 ];
+const slotIcon = (id) => SLOTS.find((s) => s.id === id)?.icon ?? '';
 
 /* ---------- root ---------- */
 export default function App() {
@@ -51,13 +45,6 @@ function Login() {
     setBusy(false);
     if (error) setMsg('البريد أو كلمة السر غير صحيحة.');
   };
-  const magic = async () => {
-    if (!email.trim()) { setMsg('اكتب البريد أولاً.'); return; }
-    setBusy(true); setMsg('');
-    const { error } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { shouldCreateUser: false, emailRedirectTo: window.location.origin } });
-    setBusy(false);
-    setMsg(error ? 'ما قدرنا نبعت الرابط. جرّب كلمة السر.' : 'بعتنالك رابط دخول على البريد.');
-  };
   return (
     <div className="login">
       <img src="/icon.svg" alt="" width="72" height="72" />
@@ -65,9 +52,8 @@ function Login() {
       <p className="muted">متابعة الأكل والوزن والحركة للعيلة. ادخل بنفس حساب «بيتنا».</p>
       <form onSubmit={submit} className="card stack">
         <label>البريد الإلكتروني<input type="email" dir="ltr" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
-        <label>كلمة السر<input type="password" dir="ltr" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
+        <label>كلمة السر<input type="password" dir="ltr" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
         <button className="btn primary" disabled={busy}>{busy ? '...' : 'دخول'}</button>
-        <button type="button" className="btn ghost" onClick={magic} disabled={busy}>ابعتلي رابط دخول بالبريد</button>
         {msg && <p className="note">{msg}</p>}
       </form>
     </div>
@@ -75,15 +61,19 @@ function Login() {
 }
 
 function Shell({ session }) {
+  const params = useMemo(() => new URLSearchParams(window.location.search), []);
   const [household, setHousehold] = useState(undefined);
   const [people, setPeople] = useState([]);
   const [personId, setPersonId] = useState(lsGet('bh.person'));
-  const [tab, setTab] = useState(lsGet('bh.tab') || 'home');
-  const [showPeople, setShowPeople] = useState(false);
+  const [tab, setTab] = useState(params.get('tab') || lsGet('bh.tab') || 'home');
+  const [sheet, setSheet] = useState(params.get('add') ? { kind: 'add', mode: params.get('add') } : null);
   const [toast, setToast] = useState('');
+  const [rev, setRev] = useState(0);
 
-  const flash = useCallback((t) => { setToast(t); setTimeout(() => setToast(''), 2200); }, []);
+  const flash = useCallback((t) => { setToast(t); setTimeout(() => setToast(''), 2400); }, []);
+  const refresh = useCallback(() => setRev((n) => n + 1), []);
 
+  useEffect(() => { if (params.toString()) window.history.replaceState(null, '', '/'); }, [params]);
   useEffect(() => {
     supabase.from('household_members').select('household_id').eq('user_id', session.user.id).limit(1)
       .then(({ data }) => setHousehold(data?.[0]?.household_id ?? null));
@@ -111,40 +101,46 @@ function Shell({ session }) {
     );
   }
 
-  const ctx = { household, person, people, flash };
+  const ctx = { household, person, people, flash, rev, refresh };
+  const openAdd = (mode = 'meal') => setSheet({ kind: 'add', mode });
 
   return (
-    <div className="app">
+    <div className="app" style={{ '--pc': person?.color || '#0f766e' }}>
       <header className="top">
         <div className="brand"><img src="/icon.svg" alt="" width="28" height="28" /><span>بيت الصحة</span></div>
-        <button className="icon-btn" onClick={() => setShowPeople(true)} aria-label="أفراد العيلة">👨‍👩‍👧‍👦</button>
+        <div className="row gap6">
+          <button className="icon-btn" onClick={() => setSheet({ kind: 'remind' })} aria-label="التذكيرات">🔔</button>
+          <button className="icon-btn" onClick={() => setSheet({ kind: 'people' })} aria-label="أفراد العيلة">👨‍👩‍👧‍👦</button>
+        </div>
       </header>
 
       <nav className="people-bar" aria-label="اختيار الفرد">
         {people.map((p) => (
           <button key={p.id} className={'chip' + (p.id === person?.id ? ' on' : '')} style={{ '--c': p.color }} onClick={() => setPersonId(p.id)}>
-            <span className="dot" />{p.name}
+            <span className="avatar">{p.name.slice(0, 1)}</span>{p.name}
           </button>
         ))}
-        <button className="chip add" onClick={() => setShowPeople(true)}>+ فرد</button>
+        <button className="chip add" onClick={() => setSheet({ kind: 'people', create: true })}>+ فرد</button>
       </nav>
 
       <main className="content">
         {!person ? (
           <div className="card empty">
             <p>ابدأ بإضافة أفراد العيلة.</p>
-            <button className="btn primary" onClick={() => setShowPeople(true)}>إضافة فرد</button>
+            <button className="btn primary" onClick={() => setSheet({ kind: 'people', create: true })}>إضافة فرد</button>
           </div>
         ) : (
           <>
-            {tab === 'home' && <Home {...ctx} go={setTab} />}
+            {tab === 'home' && <Home {...ctx} go={setTab} openAdd={openAdd} openRemind={() => setSheet({ kind: 'remind' })} />}
             {tab === 'weight' && <Weight {...ctx} />}
-            {tab === 'food' && <Food {...ctx} />}
+            {tab === 'food' && <Food {...ctx} openAdd={openAdd} />}
             {tab === 'sport' && <Sport {...ctx} />}
-            {tab === 'coach' && <Coach {...ctx} />}
+            {tab === 'coach' && <Coach {...ctx} userId={session.user.id} onSaved={refresh} />}
           </>
         )}
       </main>
+
+      {person && <button className="fab" onClick={() => openAdd(tab === 'weight' ? 'weight' : tab === 'sport' ? 'move' : 'meal')} aria-label="تسجيل سريع">+</button>}
 
       <nav className="tabs">
         {TABS.map((t) => (
@@ -154,17 +150,21 @@ function Shell({ session }) {
         ))}
       </nav>
 
-      {showPeople && (
-        <PeopleSheet household={household} people={people} onClose={() => setShowPeople(false)}
+      {sheet?.kind === 'add' && person && (
+        <QuickAdd household={household} person={person} initial={sheet.mode} flash={flash} onClose={() => setSheet(null)} onSaved={() => { setSheet(null); refresh(); }} />
+      )}
+      {sheet?.kind === 'remind' && <Reminders household={household} people={people} person={person} flash={flash} onClose={() => setSheet(null)} />}
+      {sheet?.kind === 'people' && (
+        <PeopleSheet household={household} people={people} startNew={sheet.create} onClose={() => setSheet(null)}
           onChanged={async (id) => { await loadPeople(); if (id) setPersonId(id); }} flash={flash} />
       )}
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   );
 }
 
 /* ---------- data hook ---------- */
-function useRows(table, person, dateCol, days, extraDeps = []) {
+function useRows(table, person, dateCol, days, rev) {
   const [rows, setRows] = useState(null);
   const reload = useCallback(async () => {
     if (!person) return;
@@ -172,76 +172,158 @@ function useRows(table, person, dateCol, days, extraDeps = []) {
     if (days) q = q.gte(dateCol, addDays(isoDate(), -days));
     const { data } = await q.limit(500);
     setRows(data ?? []);
-  }, [table, person?.id, dateCol, days, ...extraDeps]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setRows(null); reload(); }, [reload]);
+  }, [table, person?.id, dateCol, days, rev]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { reload(); }, [reload]);
+  useEffect(() => { setRows(null); }, [person?.id]);
   return [rows, reload];
 }
 
 /* ---------- Home ---------- */
-function Home({ person, go }) {
-  const [weights] = useRows('bh_weights', person, 'measured_on', 120);
-  const [meals] = useRows('bh_meals', person, 'eaten_on', 1);
-  const [workouts] = useRows('bh_workouts', person, 'done_on', 7);
+function Ring({ value, size = 92, stroke = 9, children }) {
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const v = Math.max(0, Math.min(1, value || 0));
+  return (
+    <div className="ring" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,.25)" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#fff" strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - v)} transform={`rotate(-90 ${size / 2} ${size / 2})`} style={{ transition: 'stroke-dashoffset .6s' }} />
+      </svg>
+      <div className="ring-in">{children}</div>
+    </div>
+  );
+}
+
+function Home({ household, person, go, openAdd, openRemind, rev, refresh, flash }) {
+  const [weights] = useRows('bh_weights', person, 'measured_on', null, rev);
+  const [meals] = useRows('bh_meals', person, 'eaten_on', 40, rev);
+  const [workouts] = useRows('bh_workouts', person, 'done_on', 40, rev);
+  const [plan, setPlan] = useState(null);
+  const [remindOn, setRemindOn] = useState(true);
   const minor = isMinor(person);
   const today = isoDate();
+
+  useEffect(() => {
+    supabase.from('bh_plans').select('week_start,plan').eq('household_id', household).order('created_at', { ascending: false }).limit(1)
+      .then(({ data }) => setPlan(data?.[0] ?? null));
+  }, [household, rev]);
+  useEffect(() => {
+    const st = pushState();
+    if (st === 'unsupported') { setRemindOn(true); return; }
+    currentSubscription().then((s) => setRemindOn(!!s)).catch(() => setRemindOn(true));
+  }, []);
+
   const last = weights?.[0];
+  const first = weights?.length ? weights[weights.length - 1] : null;
   const todayMeals = (meals ?? []).filter((m) => m.eaten_on === today);
+  const todayMove = (workouts ?? []).filter((w) => w.done_on === today).reduce((s, w) => s + w.minutes, 0);
+  const weekMin = (workouts ?? []).filter((w) => w.done_on >= addDays(today, -6)).reduce((s, w) => s + w.minutes, 0);
+  const moveTarget = minor ? 60 : 30;
   const kcal = todayMeals.reduce((s, m) => s + (m.kcal || 0), 0);
-  const weekStart = addDays(today, -6);
-  const weekMin = (workouts ?? []).filter((w) => w.done_on >= weekStart).reduce((s, w) => s + w.minutes, 0);
-  const target = minor ? 420 : 150;
-  const bmi = !minor && last && person.height_cm ? last.kg / (person.height_cm / 100) ** 2 : null;
+  const protein = todayMeals.reduce((s, m) => s + (m.protein_g || 0), 0);
+  const streak = streakOf([...(meals ?? []).map((m) => m.eaten_on), ...(workouts ?? []).map((w) => w.done_on), ...(weights ?? []).map((w) => w.measured_on)]);
+
+  let progress = null;
+  if (!minor && last && first && person.goal_kg) {
+    const total = first.kg - person.goal_kg;
+    progress = total > 0 ? (first.kg - last.kg) / total : last.kg <= person.goal_kg ? 1 : 0;
+  }
   const toGoal = !minor && last && person.goal_kg ? last.kg - person.goal_kg : null;
+  const slotsDone = new Set(todayMeals.map((m) => m.slot));
+  const checklist = [
+    ...(!minor ? [{ key: 'w', label: 'وزن اليوم', done: last?.measured_on === today, act: () => openAdd('weight') }] : []),
+    { key: 'b', label: 'الفطور', done: slotsDone.has('breakfast'), act: () => openAdd('meal') },
+    { key: 'l', label: 'الغدا', done: slotsDone.has('lunch'), act: () => openAdd('meal') },
+    { key: 'd', label: 'العشا', done: slotsDone.has('dinner'), act: () => openAdd('meal') },
+    { key: 'm', label: `${moveTarget} دقيقة حركة`, done: todayMove >= moveTarget, sub: todayMove ? `${todayMove} د` : '', act: () => openAdd('move') },
+  ];
+  const doneCount = checklist.filter((c) => c.done).length;
+  const todayPlan = plan?.plan?.days?.find((d) => d.date === today);
+  const hour = new Date().getHours();
+  const hello = hour < 12 ? 'صباح الخير' : hour < 18 ? 'نهارك سعيد' : 'مسا الخير';
 
   return (
     <div className="stack">
-      <h2 className="hello">أهلا {person.name} 👋</h2>
-      <div className="grid2">
-        <button className="card stat" onClick={() => go('weight')}>
-          <span className="lbl">آخر وزن</span>
-          <span className="big">{fmtKg(last?.kg)} <small>كغ</small></span>
-          <span className="sub">{last ? fmtDate(last.measured_on) : 'سجّل أول قياس'}</span>
-        </button>
-        {minor ? (
-          <button className="card stat" onClick={() => go('food')}>
-            <span className="lbl">وجبات اليوم</span>
-            <span className="big">{todayMeals.length}</span>
-            <span className="sub">{todayMeals.some((m) => m.slot === 'breakfast') ? 'فطرت اليوم ✓' : 'لا تنسَ الفطور'}</span>
-          </button>
-        ) : (
-          <button className="card stat" onClick={() => go('weight')}>
-            <span className="lbl">للهدف</span>
-            <span className="big">{toGoal == null ? '—' : toGoal <= 0 ? '✓' : fmtKg(toGoal)} {toGoal > 0 && <small>كغ</small>}</span>
-            <span className="sub">{person.goal_kg ? `الهدف ${fmtKg(person.goal_kg)} كغ` : 'حدّد هدف من الملف'}{bmi ? ` · BMI ${bmi.toFixed(1)}` : ''}</span>
-          </button>
-        )}
-      </div>
-
-      <div className="card">
-        <div className="row between"><h3>الحركة هذا الأسبوع</h3><span className="muted">{weekMin} / {target} دقيقة</span></div>
-        <div className="bar"><span style={{ width: Math.min(100, (weekMin / target) * 100) + '%' }} /></div>
-        <p className="muted small">{minor ? 'الهدف للأولاد: ساعة حركة باليوم.' : 'التوصية: 150 دقيقة حركة معتدلة بالأسبوع.'}</p>
-      </div>
-
-      <div className="card">
-        <div className="row between"><h3>أكل اليوم</h3>{!minor && kcal > 0 && <span className="muted">~{kcal} سعرة</span>}</div>
-        {todayMeals.length === 0 ? <p className="muted">لسا ما سجّلت أكل اليوم.</p> : (
-          <ul className="list">
-            {todayMeals.map((m) => <li key={m.id}><b>{slotLabel(m.slot)}</b> · {m.description}</li>)}
-          </ul>
-        )}
-        <div className="row gap">
-          <button className="btn primary sm" onClick={() => go('food')}>+ وجبة</button>
-          <button className="btn ghost sm" onClick={() => go('coach')}>✨ اقتراح قائمة</button>
+      <section className="hero">
+        <div className="hero-text">
+          <p className="hero-hi">{hello}</p>
+          <h2>{person.name}</h2>
+          <p className="hero-sub">{new Date().toLocaleDateString('ar', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
+          <div className="hero-badges">
+            <span className="hb">🔥 {streak} {streak === 1 ? 'يوم' : 'أيام'} متتالية</span>
+            <span className="hb">✓ {doneCount}/{checklist.length} اليوم</span>
+          </div>
         </div>
+        {progress != null ? (
+          <Ring value={progress}><b>{toGoal <= 0 ? '🎉' : fmtKg(toGoal)}</b><small>{toGoal <= 0 ? 'وصلت' : 'كغ للهدف'}</small></Ring>
+        ) : (
+          <Ring value={doneCount / checklist.length}><b>{Math.round((doneCount / checklist.length) * 100)}%</b><small>اليوم</small></Ring>
+        )}
+      </section>
+
+      <div className="stats3">
+        <button className="stat-mini" onClick={() => go('weight')}><span>⚖️</span><b>{fmtKg(last?.kg)}</b><small>{last ? fmtShort(last.measured_on) : 'كغ'}</small></button>
+        <button className="stat-mini" onClick={() => go('sport')}><span>🚶</span><b>{weekMin}</b><small>دقيقة/أسبوع</small></button>
+        {minor ? (
+          <button className="stat-mini" onClick={() => go('food')}><span>🍽️</span><b>{todayMeals.length}</b><small>وجبات اليوم</small></button>
+        ) : (
+          <button className="stat-mini" onClick={() => go('food')}><span>🍽️</span><b>{kcal ? `~${kcal}` : todayMeals.length}</b><small>{kcal ? `سعرة${protein ? ` · ${protein}غ بروتين` : ''}` : 'وجبات اليوم'}</small></button>
+        )}
       </div>
+
+      <div className="card">
+        <div className="row between"><h3>مهام اليوم</h3><span className="muted small">اكبس للتسجيل</span></div>
+        <ul className="checklist">
+          {checklist.map((c) => (
+            <li key={c.key}>
+              <button className={c.done ? 'done' : ''} onClick={c.act}>
+                <span className="tick">{c.done ? '✓' : ''}</span>
+                <span className="grow">{c.label}</span>
+                {c.sub && <span className="muted small">{c.sub}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {todayPlan ? (
+        <div className="card">
+          <div className="row between"><h3>🗓️ أكل اليوم من خطة الأسبوع</h3><button className="btn ghost sm" onClick={() => go('coach')}>الخطة</button></div>
+          <ul className="list">
+            {todayPlan.meals.map((m, i) => <li key={i}>{slotIcon(m.slot)} <b>{slotLabel(m.slot)}:</b> {m.title}</li>)}
+          </ul>
+        </div>
+      ) : (
+        <button className="card cta" onClick={() => go('coach')}>
+          <span className="cta-ic">🗓️</span>
+          <span className="grow"><b>خطة أكل للأسبوع + قائمة مشتريات</b><small className="muted">المدرب بيحضّرها للعيلة كلها، وبتنبعت لـ «بيتنا».</small></span>
+          <span className="muted">‹</span>
+        </button>
+      )}
+
+      {!remindOn && (
+        <button className="card cta" onClick={openRemind}>
+          <span className="cta-ic">🔔</span>
+          <span className="grow"><b>فعّل التذكيرات اليومية</b><small className="muted">تذكير بالوزن والأكل والحركة، بس إذا لسا ما سجّلت.</small></span>
+          <span className="muted">‹</span>
+        </button>
+      )}
+
+      {todayMeals.length > 0 && (
+        <div className="card">
+          <h3>سجل أكل اليوم</h3>
+          <ul className="list">
+            {todayMeals.map((m) => <li key={m.id}>{slotIcon(m.slot)} <b>{slotLabel(m.slot)}</b> · {m.description}</li>)}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
 
 /* ---------- Weight ---------- */
-function Weight({ household, person, flash }) {
-  const [rows, reload] = useRows('bh_weights', person, 'measured_on', null);
+function Weight({ household, person, flash, rev, refresh }) {
+  const [rows, reload] = useRows('bh_weights', person, 'measured_on', null, rev);
   const [kg, setKg] = useState('');
   const [date, setDate] = useState(isoDate());
   const minor = isMinor(person);
@@ -252,7 +334,7 @@ function Weight({ household, person, flash }) {
     if (!(v > 10 && v < 400)) return flash('رقم الوزن مش منطقي');
     const { error } = await supabase.from('bh_weights').insert({ household_id: household, person_id: person.id, kg: v, measured_on: date });
     if (error) return flash('ما انحفظ، جرّب مرة ثانية');
-    setKg(''); flash('انحفظ ✓'); reload();
+    setKg(''); flash('انحفظ ✓'); refresh();
   };
   const del = async (id) => { if (!confirm('حذف القياس؟')) return; await supabase.from('bh_weights').delete().eq('id', id); reload(); };
 
@@ -260,10 +342,10 @@ function Weight({ household, person, flash }) {
   const first = pts[0], last = pts[pts.length - 1];
   const wk = useMemo(() => {
     if (!rows?.length) return null;
-    const cut = addDays(isoDate(), -7);
-    const older = rows.find((r) => r.measured_on <= cut);
+    const older = rows.find((r) => r.measured_on <= addDays(isoDate(), -7));
     return older ? rows[0].kg - older.kg : null;
   }, [rows]);
+  const bmi = !minor && last && person.height_cm ? last.kg / (person.height_cm / 100) ** 2 : null;
 
   return (
     <div className="stack">
@@ -278,12 +360,17 @@ function Weight({ household, person, flash }) {
           <h3>التقدم</h3>
           {first && last && first !== last && (
             <span className={'pill ' + (last.kg <= first.kg ? 'good' : 'warn')}>
-              {last.kg <= first.kg ? '▼' : '▲'} {fmtKg(Math.abs(last.kg - first.kg))} كغ منذ {fmtDate(first.measured_on)}
+              {last.kg <= first.kg ? '▼' : '▲'} {fmtKg(Math.abs(last.kg - first.kg))} كغ منذ {fmtShort(first.measured_on)}
             </span>
           )}
         </div>
         <WeightChart pts={pts} goal={minor ? null : person.goal_kg} color={person.color} />
-        {wk != null && !minor && <p className="muted small">آخر أسبوع: {wk > 0 ? '+' : ''}{fmtKg(wk)} كغ. نزول نص كيلو بالأسبوع أو أقل هو الوتيرة الآمنة.</p>}
+        <div className="row gap wrap small muted" style={{ marginTop: 8 }}>
+          {wk != null && !minor && <span>آخر أسبوع: {wk === 0 ? 'ثابت' : `${wk < 0 ? 'نزول' : 'زيادة'} ${fmtKg(Math.abs(wk))} كغ`}</span>}
+          {bmi && <span>· BMI {bmi.toFixed(1)}</span>}
+          {!minor && person.goal_kg && <span>· الهدف {fmtKg(person.goal_kg)} كغ</span>}
+        </div>
+        {!minor && <p className="muted small" style={{ marginTop: 6 }}>نزول نص كيلو بالأسبوع أو أقل هو الوتيرة الآمنة.</p>}
       </div>
 
       <div className="card">
@@ -301,7 +388,7 @@ function Weight({ household, person, flash }) {
 }
 
 function WeightChart({ pts, goal, color }) {
-  if (pts.length < 2) return <p className="muted">بعد قياسين بيظهر الرسم البياني.</p>;
+  if (pts.length < 2) return <p className="muted" style={{ marginTop: 8 }}>بعد قياسين بيظهر الرسم البياني.</p>;
   const W = 340, H = 170, P = { t: 12, r: 10, b: 22, l: 34 };
   const vals = pts.map((p) => Number(p.kg)).concat(goal ? [Number(goal)] : []);
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -311,12 +398,15 @@ function WeightChart({ pts, goal, color }) {
   const x = (iso) => P.l + ((Date.parse(iso) - t0) / Math.max(1, t1 - t0)) * (W - P.l - P.r);
   const y = (v) => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.measured_on).toFixed(1)},${y(p.kg).toFixed(1)}`).join(' ');
+  const area = `${d} L${x(pts[pts.length - 1].measured_on).toFixed(1)},${H - P.b} L${x(pts[0].measured_on).toFixed(1)},${H - P.b} Z`;
   const ticks = [lo, (lo + hi) / 2, hi];
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="chart" dir="ltr" role="img" aria-label="رسم الوزن">
+    <svg viewBox={`0 0 ${W} ${H}`} className="chart" role="img" aria-label="رسم الوزن">
+      <defs><linearGradient id="wg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor={color} stopOpacity=".22" /><stop offset="1" stopColor={color} stopOpacity="0" /></linearGradient></defs>
       {ticks.map((t) => (
         <g key={t}><line x1={P.l} x2={W - P.r} y1={y(t)} y2={y(t)} className="grid" /><text x={P.l - 6} y={y(t) + 4} textAnchor="end" className="axis">{Math.round(t * 10) / 10}</text></g>
       ))}
+      <path d={area} fill="url(#wg)" />
       {goal && <><line x1={P.l} x2={W - P.r} y1={y(goal)} y2={y(goal)} className="goal" /><text x={W - P.r} y={y(goal) - 4} textAnchor="end" className="axis goal-t">الهدف</text></>}
       <path d={d} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
       {pts.map((p) => <circle key={p.id} cx={x(p.measured_on)} cy={y(p.kg)} r="3" fill={color} />)}
@@ -327,47 +417,35 @@ function WeightChart({ pts, goal, color }) {
 }
 
 /* ---------- Food ---------- */
-function Food({ household, person, flash }) {
+function Food({ household, person, flash, rev, openAdd }) {
   const [day, setDay] = useState(isoDate());
-  const [rows, reload] = useRows('bh_meals', person, 'eaten_on', 30);
-  const [slot, setSlot] = useState(defaultSlot());
-  const [desc, setDesc] = useState('');
-  const [kcal, setKcal] = useState('');
+  const [rows, reload] = useRows('bh_meals', person, 'eaten_on', 30, rev);
   const [showMenus, setShowMenus] = useState(false);
   const minor = isMinor(person);
 
   const list = (rows ?? []).filter((m) => m.eaten_on === day);
   const total = list.reduce((s, m) => s + (m.kcal || 0), 0);
+  const protein = list.reduce((s, m) => s + (m.protein_g || 0), 0);
 
   const insert = async (items) => {
     const { error } = await supabase.from('bh_meals').insert(items.map((m) => ({ household_id: household, person_id: person.id, eaten_on: day, ...m })));
     if (error) { flash('ما انحفظ'); return false; }
     reload(); return true;
   };
-  const add = async (e) => {
-    e.preventDefault();
-    if (!desc.trim()) return;
-    const k = parseInt(kcal, 10);
-    if (await insert([{ slot, description: desc.trim(), kcal: Number.isFinite(k) ? k : null }])) { setDesc(''); setKcal(''); flash('انضافت ✓'); }
-  };
   const del = async (id) => { await supabase.from('bh_meals').delete().eq('id', id); reload(); };
 
   return (
     <div className="stack">
+      <button className="card cta big" onClick={() => openAdd('meal')}>
+        <span className="cta-ic">📷</span>
+        <span className="grow"><b>سجّل وجبة</b><small className="muted">صوّر الصحن أو اكتب جملة، والمدرب بيرتّبها.</small></span>
+        <span className="muted">‹</span>
+      </button>
+
       <DayNav day={day} setDay={setDay} />
-      <form className="card stack" onSubmit={add}>
-        <div className="seg">
-          {SLOTS.map((s) => <button type="button" key={s.id} className={slot === s.id ? 'on' : ''} onClick={() => setSlot(s.id)}>{s.icon} {s.label}</button>)}
-        </div>
-        <label>شو أكلت؟<textarea rows="2" placeholder="مثلاً: صحن مجدّرة وسلطة ولبن" value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
-        <div className="row gap">
-          {!minor && <label className="grow">سعرات (اختياري)<input inputMode="numeric" dir="ltr" value={kcal} onChange={(e) => setKcal(e.target.value.replace(/\D/g, ''))} /></label>}
-          <button className="btn primary self-end">إضافة</button>
-        </div>
-      </form>
 
       <div className="card">
-        <div className="row between"><h3>{day === isoDate() ? 'اليوم' : fmtDate(day)}</h3>{!minor && total > 0 && <span className="muted">~{total} سعرة</span>}</div>
+        <div className="row between"><h3>{day === isoDate() ? 'اليوم' : fmtDate(day)}</h3>{!minor && total > 0 && <span className="muted small">~{total} سعرة{protein ? ` · ${protein}غ بروتين` : ''}</span>}</div>
         {SLOTS.map((s) => {
           const items = list.filter((m) => m.slot === s.id);
           if (!items.length) return null;
@@ -375,18 +453,18 @@ function Food({ household, person, flash }) {
             <div key={s.id} className="slot">
               <h4>{s.icon} {s.label}</h4>
               <ul className="list rows">
-                {items.map((m) => <li key={m.id}><span className="grow">{m.description}</span>{!minor && m.kcal ? <span className="muted">{m.kcal}</span> : null}<button className="x" onClick={() => del(m.id)} aria-label="حذف">×</button></li>)}
+                {items.map((m) => <li key={m.id}><span className="grow">{m.description}</span>{!minor && m.kcal ? <span className="muted small">{m.kcal}</span> : null}<button className="x" onClick={() => del(m.id)} aria-label="حذف">×</button></li>)}
               </ul>
             </div>
           );
         })}
-        {rows !== null && list.length === 0 && <p className="muted">ما في وجبات مسجلة لهذا اليوم.</p>}
+        {rows !== null && list.length === 0 && <p className="muted" style={{ marginTop: 8 }}>ما في وجبات مسجلة لهذا اليوم.</p>}
       </div>
 
       <div className="card">
-        <button className="row between full plain" onClick={() => setShowMenus((v) => !v)}><h3>قوائم جاهزة من المطبخ البيتي</h3><span>{showMenus ? '▲' : '▼'}</span></button>
+        <button className="row between full plain" onClick={() => setShowMenus((v) => !v)}><h3>قوائم جاهزة من المطبخ البيتي</h3><span className="muted">{showMenus ? '▲' : '▼'}</span></button>
         {showMenus && (
-          <div className="stack">
+          <div className="stack" style={{ marginTop: 8 }}>
             <p className="muted small">حلال، بدون دجاج وبدون خبز. اضغط «سجّل» لما تاكل الوجبة.</p>
             {MENUS.map((menu) => (
               <div key={menu.name} className="menu">
@@ -394,7 +472,7 @@ function Food({ household, person, flash }) {
                 {menu.meals.map((m) => (
                   <div key={m.title} className="menu-item">
                     <div className="grow"><b>{slotLabel(m.slot)}: {m.title}</b><p className="muted small">{m.items}{!minor && ` · ~${m.kcal}`}</p></div>
-                    <button className="btn ghost sm" onClick={async () => { if (await insert([{ slot: m.slot, description: `${m.title} — ${m.items}`, kcal: minor ? null : m.kcal }])) flash('انسجلت ✓'); }}>سجّل</button>
+                    <button className="btn ghost sm" onClick={async () => { if (await insert([{ slot: m.slot, description: `${m.title} — ${m.items}`, kcal: minor ? null : m.kcal, source: 'menu' }])) flash('انسجلت ✓'); }}>سجّل</button>
                   </div>
                 ))}
               </div>
@@ -405,11 +483,6 @@ function Food({ household, person, flash }) {
       </div>
     </div>
   );
-}
-
-function defaultSlot() {
-  const h = new Date().getHours();
-  return h < 11 ? 'breakfast' : h < 16 ? 'lunch' : h < 18 ? 'snack' : 'dinner';
 }
 
 function DayNav({ day, setDay }) {
@@ -424,8 +497,8 @@ function DayNav({ day, setDay }) {
 }
 
 /* ---------- Sport ---------- */
-function Sport({ household, person, flash }) {
-  const [rows, reload] = useRows('bh_workouts', person, 'done_on', 60);
+function Sport({ household, person, flash, rev, refresh }) {
+  const [rows, reload] = useRows('bh_workouts', person, 'done_on', 60, rev);
   const [kind, setKind] = useState('walk');
   const [minutes, setMinutes] = useState('30');
   const [steps, setSteps] = useState('');
@@ -439,7 +512,7 @@ function Sport({ household, person, flash }) {
     const s = parseInt(steps, 10);
     const { error } = await supabase.from('bh_workouts').insert({ household_id: household, person_id: person.id, kind, minutes: m, steps: Number.isFinite(s) ? s : null, done_on: date });
     if (error) return flash('ما انحفظ');
-    setSteps(''); flash('يعطيك العافية 💪'); reload();
+    setSteps(''); flash('يعطيك العافية 💪'); refresh();
   };
   const del = async (id) => { await supabase.from('bh_workouts').delete().eq('id', id); reload(); };
 
@@ -451,12 +524,31 @@ function Sport({ household, person, flash }) {
     }
     return out;
   }, [rows]);
-  const max = Math.max(60, ...days.map((d) => d.min));
+  const target = minor ? 60 : 30;
+  const max = Math.max(target * 1.5, ...days.map((d) => d.min));
   const week = days.reduce((s, d) => s + d.min, 0);
 
   return (
     <div className="stack">
+      <div className="card">
+        <div className="row between"><h3>آخر 7 أيام</h3><span className="muted small">{week} دقيقة</span></div>
+        <div className="week">
+          {days.map((d) => (
+            <div key={d.d} className="wcol">
+              <span className="wv">{d.min || ''}</span>
+              <div className="wbar">
+                <i className="wtarget" style={{ bottom: (target / max) * 100 + '%' }} />
+                <span style={{ height: (d.min / max) * 100 + '%', background: d.min >= target ? person.color : `color-mix(in srgb, ${person.color} 55%, transparent)` }} />
+              </div>
+              <span className={'wd' + (d.d === isoDate() ? ' now' : '')}>{new Date(d.d + 'T12:00:00').toLocaleDateString('ar', { weekday: 'narrow' })}</span>
+            </div>
+          ))}
+        </div>
+        <p className="muted small">{minor ? 'الهدف: ساعة حركة كل يوم (لعب، مشي، رياضة).' : 'الهدف: 30 دقيقة باليوم، 150 بالأسبوع.'} الخط المنقّط هو هدف اليوم.</p>
+      </div>
+
       <form className="card stack" onSubmit={add}>
+        <h3>تسجيل نشاط</h3>
         <div className="kinds">
           {KINDS.map((k) => <button type="button" key={k.id} className={kind === k.id ? 'on' : ''} onClick={() => setKind(k.id)}><span>{k.icon}</span>{k.label}</button>)}
         </div>
@@ -469,25 +561,11 @@ function Sport({ household, person, flash }) {
       </form>
 
       <div className="card">
-        <div className="row between"><h3>آخر 7 أيام</h3><span className="muted">{week} دقيقة</span></div>
-        <div className="week">
-          {days.map((d) => (
-            <div key={d.d} className="wcol">
-              <span className="wv">{d.min || ''}</span>
-              <div className="wbar"><span style={{ height: (d.min / max) * 100 + '%', background: person.color }} /></div>
-              <span className="wd">{new Date(d.d + 'T12:00:00').toLocaleDateString('ar', { weekday: 'narrow' })}</span>
-            </div>
-          ))}
-        </div>
-        <p className="muted small">{minor ? 'الهدف: ساعة حركة كل يوم (لعب، مشي، رياضة).' : 'الهدف: 150 دقيقة بالأسبوع — مثلاً 30 دقيقة مشي 5 أيام.'}</p>
-      </div>
-
-      <div className="card">
         <h3>السجل</h3>
         {rows === null ? <p className="muted">...</p> : rows.length === 0 ? <p className="muted">ما في نشاط مسجل بعد.</p> : (
           <ul className="list rows">
             {rows.slice(0, 40).map((r) => (
-              <li key={r.id}><span className="nowrap">{kindOf(r.kind).icon} {kindOf(r.kind).label}</span><span className="muted">{fmtDate(r.done_on)}</span><b>{r.minutes} د</b>{r.steps ? <span className="muted">{r.steps.toLocaleString('ar')} خطوة</span> : null}<button className="x" onClick={() => del(r.id)} aria-label="حذف">×</button></li>
+              <li key={r.id}><span className="nowrap">{kindOf(r.kind).icon} {kindOf(r.kind).label}</span><span className="muted small">{fmtDate(r.done_on)}</span><b>{r.minutes} د</b><button className="x" onClick={() => del(r.id)} aria-label="حذف">×</button></li>
             ))}
           </ul>
         )}
@@ -496,87 +574,12 @@ function Sport({ household, person, flash }) {
   );
 }
 
-/* ---------- Coach ---------- */
-const ERRORS = {
-  quota: 'وصلت للحد اليومي للمدرب (25 طلب). جرّب بكرا.',
-  ai_not_configured: 'المدرب الذكي مش مفعّل بعد.',
-  ai_busy: 'المدرب مشغول هلّق، جرّب بعد دقيقة.',
-  ai_key_invalid: 'في مشكلة بمفتاح الذكاء الاصطناعي.',
-};
-
-function Coach({ household, person, flash }) {
-  const [busy, setBusy] = useState('');
-  const [res, setRes] = useState(null);
-  const [question, setQuestion] = useState('');
-  const minor = isMinor(person);
-
-  useEffect(() => { setRes(null); }, [person.id]);
-
-  const call = async (mode) => {
-    setBusy(mode); setRes(null);
-    const { data, error } = await supabase.functions.invoke('bh-coach', { body: { mode, person_id: person.id, question, today: isoDate() } });
-    setBusy('');
-    if (error) {
-      let code = '';
-      try { code = (await error.context.json()).error; } catch { /* ignore */ }
-      return flash(ERRORS[code] || 'صار خطأ، جرّب مرة ثانية');
-    }
-    setRes({ mode, ...data.result });
-  };
-
-  const logMeal = async (m) => {
-    const { error } = await supabase.from('bh_meals').insert({ household_id: household, person_id: person.id, eaten_on: isoDate(), slot: m.slot, description: `${m.title} — ${m.items}`, kcal: minor ? null : m.kcal || null });
-    flash(error ? 'ما انحفظ' : 'انسجلت ✓');
-  };
-
-  return (
-    <div className="stack">
-      <div className="card coach-head">
-        <h3>✨ المدرب الذكي</h3>
-        <p className="muted small">بيقرا سجل {person.name} (وزن، أكل، حركة) ويقترح بحسبه. {person.restrictions ? `القيود: ${person.restrictions}.` : ''}</p>
-        <div className="row gap wrap">
-          <button className="btn primary" disabled={!!busy} onClick={() => call('plan')}>{busy === 'plan' ? 'لحظة...' : 'اقترح قائمة لليوم'}</button>
-          <button className="btn ghost" disabled={!!busy} onClick={() => call('week')}>{busy === 'week' ? 'لحظة...' : 'راجع أسبوعي'}</button>
-        </div>
-      </div>
-
-      <form className="card stack" onSubmit={(e) => { e.preventDefault(); if (question.trim().length > 1) call('ask'); }}>
-        <label>اسأل المدرب<textarea rows="2" placeholder="مثلاً: شو بديل صحي للحلو بعد الغدا؟" value={question} onChange={(e) => setQuestion(e.target.value)} /></label>
-        <button className="btn ghost" disabled={!!busy}>{busy === 'ask' ? 'لحظة...' : 'اسأل'}</button>
-      </form>
-
-      {res?.mode === 'plan' && (
-        <div className="card stack">
-          <p>{res.intro}</p>
-          {(res.meals ?? []).map((m, i) => (
-            <div key={i} className="menu-item">
-              <div className="grow"><b>{slotLabel(m.slot)}: {m.title}</b><p className="muted small">{m.items}{!minor && m.kcal ? ` · ~${m.kcal}` : ''}</p></div>
-              <button className="btn ghost sm" onClick={() => logMeal(m)}>سجّل</button>
-            </div>
-          ))}
-          {res.activity && <p className="tipbox">🏃 {res.activity}</p>}
-        </div>
-      )}
-      {res?.mode === 'week' && (
-        <div className="card stack">
-          <h3>{res.headline}</h3>
-          {(res.points ?? []).map((p, i) => (
-            <div key={i} className={'point ' + p.kind}><b>{p.title}</b><p>{p.text}</p></div>
-          ))}
-        </div>
-      )}
-      {res?.mode === 'ask' && <div className="card"><p className="pre">{res.answer}</p></div>}
-      <p className="muted small center">اقتراحات عامة، مش بديل عن طبيب أو أخصائي تغذية.</p>
-    </div>
-  );
-}
-
 /* ---------- People ---------- */
 const EMPTY = { name: '', birth_year: '', sex: '', height_cm: '', goal_kg: '', activity: 'light', restrictions: 'حلال', color: COLORS[0] };
 
-function PeopleSheet({ household, people, onClose, onChanged, flash }) {
-  const [edit, setEdit] = useState(null);
-  const startNew = () => setEdit({ ...EMPTY, color: COLORS[people.length % COLORS.length] });
+function PeopleSheet({ household, people, startNew, onClose, onChanged, flash }) {
+  const [edit, setEdit] = useState(startNew ? { ...EMPTY, color: COLORS[people.length % COLORS.length] } : null);
+  const newOne = () => setEdit({ ...EMPTY, color: COLORS[people.length % COLORS.length] });
   const save = async (e) => {
     e.preventDefault();
     const num = (v) => (v === '' || v == null ? null : Number(v));
@@ -597,15 +600,16 @@ function PeopleSheet({ household, people, onClose, onChanged, flash }) {
   return (
     <div className="sheet-bg" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="أفراد العيلة">
-        <div className="row between"><h3>{edit ? (edit.id ? 'تعديل' : 'فرد جديد') : 'أفراد العيلة'}</h3><button className="icon-btn" onClick={edit ? () => setEdit(null) : onClose} aria-label="إغلاق">×</button></div>
+        <div className="grabber" />
+        <div className="row between"><h3>{edit ? (edit.id ? 'تعديل' : 'فرد جديد') : 'أفراد العيلة'}</h3><button className="icon-btn" onClick={edit && !startNew ? () => setEdit(null) : onClose} aria-label="إغلاق">×</button></div>
         {!edit ? (
           <div className="stack">
             {people.map((p) => (
               <button key={p.id} className="person-row" onClick={() => setEdit({ ...EMPTY, ...p, birth_year: p.birth_year ?? '', height_cm: p.height_cm ?? '', goal_kg: p.goal_kg ?? '', sex: p.sex ?? '' })}>
-                <span className="dot" style={{ background: p.color }} /><b className="grow">{p.name}</b><span className="muted small">{ageOf(p) != null ? `${ageOf(p)} سنة` : ''}</span><span>✎</span>
+                <span className="avatar lg" style={{ background: p.color }}>{p.name.slice(0, 1)}</span><b className="grow">{p.name}</b><span className="muted small">{ageOf(p) != null ? `${ageOf(p)} سنة` : ''}</span><span>✎</span>
               </button>
             ))}
-            <button className="btn primary" onClick={startNew}>+ إضافة فرد</button>
+            <button className="btn primary" onClick={newOne}>+ إضافة فرد</button>
             <button className="btn ghost" onClick={() => supabase.auth.signOut()}>تسجيل خروج</button>
           </div>
         ) : (
