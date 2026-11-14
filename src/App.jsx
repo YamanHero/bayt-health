@@ -6,6 +6,7 @@ import { currentSubscription, pushState } from './push.js';
 import QuickAdd from './QuickAdd.jsx';
 import Coach from './Coach.jsx';
 import Reminders from './Reminders.jsx';
+import Calendar, { TodayMarks } from './Calendar.jsx';
 
 const TABS = [
   { id: 'home', label: 'اليوم', icon: '🏠' },
@@ -109,6 +110,7 @@ function Shell({ session }) {
       <header className="top">
         <div className="brand"><img src="/icon.svg" alt="" width="28" height="28" /><span>بيت الصحة</span></div>
         <div className="row gap6">
+          <button className={'icon-btn' + (tab === 'cal' ? ' on' : '')} onClick={() => setTab('cal')} aria-label="التقويم">📅</button>
           <button className="icon-btn" onClick={() => setSheet({ kind: 'remind' })} aria-label="التذكيرات">🔔</button>
           <button className="icon-btn" onClick={() => setSheet({ kind: 'people' })} aria-label="أفراد العيلة">👨‍👩‍👧‍👦</button>
         </div>
@@ -135,12 +137,13 @@ function Shell({ session }) {
             {tab === 'weight' && <Weight {...ctx} />}
             {tab === 'food' && <Food {...ctx} openAdd={openAdd} />}
             {tab === 'sport' && <Sport {...ctx} />}
+            {tab === 'cal' && <Calendar {...ctx} />}
             {tab === 'coach' && <Coach {...ctx} userId={session.user.id} onSaved={refresh} />}
           </>
         )}
       </main>
 
-      {person && <button className="fab" onClick={() => openAdd(tab === 'weight' ? 'weight' : tab === 'sport' ? 'move' : 'meal')} aria-label="تسجيل سريع">+</button>}
+      {person && tab !== 'cal' && <button className="fab" onClick={() => openAdd(tab === 'weight' ? 'weight' : tab === 'sport' ? 'move' : 'meal')} aria-label="تسجيل سريع">+</button>}
 
       <nav className="tabs">
         {TABS.map((t) => (
@@ -285,6 +288,8 @@ function Home({ household, person, go, openAdd, openRemind, rev, refresh, flash 
           ))}
         </ul>
       </div>
+
+      <TodayMarks household={household} person={person} flash={flash} rev={rev} go={go} />
 
       {todayPlan ? (
         <div className="card">
