@@ -13,6 +13,7 @@ const TABS = [
   { id: 'weight', label: 'الوزن', icon: '⚖️' },
   { id: 'food', label: 'الأكل', icon: '🥗' },
   { id: 'sport', label: 'الحركة', icon: '🏃' },
+  { id: 'cal', label: 'التقويم', icon: '📅' },
   { id: 'coach', label: 'المدرب', icon: '✨' },
 ];
 const slotIcon = (id) => SLOTS.find((s) => s.id === id)?.icon ?? '';
@@ -110,7 +111,6 @@ function Shell({ session }) {
       <header className="top">
         <div className="brand"><img src="/icon.svg" alt="" width="28" height="28" /><span>بيت الصحة</span></div>
         <div className="row gap6">
-          <button className={'icon-btn' + (tab === 'cal' ? ' on' : '')} onClick={() => setTab('cal')} aria-label="التقويم">📅</button>
           <button className="icon-btn" onClick={() => setSheet({ kind: 'remind' })} aria-label="التذكيرات">🔔</button>
           <button className="icon-btn" onClick={() => setSheet({ kind: 'people' })} aria-label="أفراد العيلة">👨‍👩‍👧‍👦</button>
         </div>
