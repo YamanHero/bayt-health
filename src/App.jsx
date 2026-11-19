@@ -6,14 +6,14 @@ import { currentSubscription, pushState } from './push.js';
 import QuickAdd from './QuickAdd.jsx';
 import Coach from './Coach.jsx';
 import Reminders from './Reminders.jsx';
-import Calendar, { TodayMarks } from './Calendar.jsx';
+import Sugar, { SugarCard } from './Sugar.jsx';
 
 const TABS = [
   { id: 'home', label: 'اليوم', icon: '🏠' },
   { id: 'weight', label: 'الوزن', icon: '⚖️' },
   { id: 'food', label: 'الأكل', icon: '🥗' },
   { id: 'sport', label: 'الحركة', icon: '🏃' },
-  { id: 'cal', label: 'التقويم', icon: '📅' },
+  { id: 'sugar', label: 'بدون سكر', icon: '🍬' },
   { id: 'coach', label: 'المدرب', icon: '✨' },
 ];
 const slotIcon = (id) => SLOTS.find((s) => s.id === id)?.icon ?? '';
@@ -137,13 +137,13 @@ function Shell({ session }) {
             {tab === 'weight' && <Weight {...ctx} />}
             {tab === 'food' && <Food {...ctx} openAdd={openAdd} />}
             {tab === 'sport' && <Sport {...ctx} />}
-            {tab === 'cal' && <Calendar {...ctx} />}
+            {tab === 'sugar' && <Sugar {...ctx} />}
             {tab === 'coach' && <Coach {...ctx} userId={session.user.id} onSaved={refresh} />}
           </>
         )}
       </main>
 
-      {person && tab !== 'cal' && <button className="fab" onClick={() => openAdd(tab === 'weight' ? 'weight' : tab === 'sport' ? 'move' : 'meal')} aria-label="تسجيل سريع">+</button>}
+      {person && tab !== 'sugar' && <button className="fab" onClick={() => openAdd(tab === 'weight' ? 'weight' : tab === 'sport' ? 'move' : 'meal')} aria-label="تسجيل سريع">+</button>}
 
       <nav className="tabs">
         {TABS.map((t) => (
@@ -289,7 +289,7 @@ function Home({ household, person, go, openAdd, openRemind, rev, refresh, flash 
         </ul>
       </div>
 
-      <TodayMarks household={household} person={person} flash={flash} rev={rev} go={go} />
+      <SugarCard household={household} person={person} flash={flash} rev={rev} refresh={refresh} go={go} />
 
       {todayPlan ? (
         <div className="card">
